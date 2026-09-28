@@ -5,9 +5,15 @@ loader (`load_physical_aiavdataset`, 7-camera ring, 4 frames) and writes one npz
 clip. Resumable: a sample already on disk is skipped. See `cache_a2.py` for the
 schema and why the existing 4-camera cache cannot serve this model.
 
+`--manifest` / `--cache-name` / `--old-cache-name` point the same builder at another clip
+set, e.g. the calibration clips the importance runs use (t0 then comes from that manifest).
+
 Usage:
   python experiments/oodval/build_cache_a2.py --workers 16
   python experiments/oodval/build_cache_a2.py --verify     # ego tensors vs the 4-cam cache
+  python experiments/oodval/build_cache_a2.py --workers 16 \
+      --manifest /mnt/nvme1n1/ad_vla/outputs/chan/eval_sets/calib_100.parquet \
+      --cache-name calib_a2 --old-cache-name calib
 """
 
 import argparse
@@ -30,8 +36,8 @@ EGO_KEYS = ("ego_history_xyz", "ego_history_rot", "ego_future_xyz", "ego_future_
 
 def build_one(task):
     """Load one clip at its event timestamp and write the npz. Returns a status dict."""
-    clip_id, t0_us = task
-    out = ca.path_for(clip_id, t0_us)
+    clip_id, t0_us, root = task
+    out = ca.path_for(clip_id, t0_us, root)
     if out.exists():
         return {"clip_id": clip_id, "status": "skip", "bytes": out.stat().st_size}
 
@@ -79,11 +85,11 @@ def build_one(task):
             "bytes": out.stat().st_size}
 
 
-def verify(man):
+def verify(man, root, old_root):
     """Ego tensors must equal the 4-camera cache's: same clip, same t0, same loader math."""
     bad, missing = [], 0
     for r in man.itertuples():
-        new, old = ca.path_for(r.clip_id, r.t0_us), ca.path_for(r.clip_id, r.t0_us, ca.OLD_CACHE)
+        new, old = ca.path_for(r.clip_id, r.t0_us, root), ca.path_for(r.clip_id, r.t0_us, old_root)
         if not new.exists() or not old.exists():
             missing += 1
             continue
@@ -103,16 +109,22 @@ def main():
     ap.add_argument("--workers", type=int, default=16)
     ap.add_argument("--limit", type=int, default=None, help="build only the first N (smoke)")
     ap.add_argument("--verify", action="store_true", help="only compare against the 4-cam cache")
+    ap.add_argument("--manifest", default=str(ca.MANIFEST), help="parquet with clip_id, t0_us")
+    ap.add_argument("--cache-name", default="ood_a2", help="pre_processed/<name> to write")
+    ap.add_argument("--old-cache-name", default="ood",
+                    help="the 4-camera cache of the same clips, for --verify")
     args = ap.parse_args()
 
-    man = pd.read_parquet(ca.MANIFEST)
+    root = ca.AV / "pre_processed" / args.cache_name
+    old_root = ca.AV / "pre_processed" / args.old_cache_name
+    man = pd.read_parquet(args.manifest)
     if args.limit:
         man = man.head(args.limit)
     if args.verify:
-        sys.exit(0 if verify(man) else 1)
+        sys.exit(0 if verify(man, root, old_root) else 1)
 
-    (ca.CACHE / "samples").mkdir(parents=True, exist_ok=True)
-    tasks = [(r.clip_id, int(r.t0_us)) for r in man.itertuples()]
+    (root / "samples").mkdir(parents=True, exist_ok=True)
+    tasks = [(r.clip_id, int(r.t0_us), root) for r in man.itertuples()]
     done, errors, t0 = [], [], time.time()
     with ProcessPoolExecutor(max_workers=args.workers) as ex:
         futs = {ex.submit(build_one, t): t[0] for t in tasks}
@@ -126,18 +138,18 @@ def main():
                       f"elapsed {el / 60:.1f} min  eta {el / i * (len(tasks) - i) / 60:.1f} min",
                       flush=True)
 
-    index = sorted(p.stem for p in (ca.CACHE / "samples").glob("*.npz"))
-    (ca.CACHE / "index.json").write_text(json.dumps(index))
-    (ca.CACHE / "errors.json").write_text(json.dumps(errors, indent=2))
-    total_gb = sum(p.stat().st_size for p in (ca.CACHE / "samples").glob("*.npz")) / 2**30
-    (ca.CACHE / "summary.txt").write_text(
-        f"OOD-val sample cache for Alpamayo 2 Super\n"
+    index = sorted(p.stem for p in (root / "samples").glob("*.npz"))
+    (root / "index.json").write_text(json.dumps(index))
+    (root / "errors.json").write_text(json.dumps(errors, indent=2))
+    total_gb = sum(p.stat().st_size for p in (root / "samples").glob("*.npz")) / 2**30
+    (root / "summary.txt").write_text(
+        f"7-camera sample cache for Alpamayo 2 Super ({args.cache_name})\n"
         f"clips in manifest: {len(man)}\n"
         f"built: {len(index)}   failed: {len(errors)}\n"
         f"size: {total_gb:.2f} GB\n"
         f"schema: 28 jpegs (7 cam x 4 frame, quality 95) + ego + absolute_timestamps\n"
-        f"t0_us: per-clip event_start_timestamp, from {ca.MANIFEST}\n")
-    print(f"\ndone: {len(index)} samples, {total_gb:.2f} GB, {len(errors)} errors -> {ca.CACHE}",
+        f"t0_us: per-clip, from {args.manifest}\n")
+    print(f"\ndone: {len(index)} samples, {total_gb:.2f} GB, {len(errors)} errors -> {root}",
           flush=True)
 
 
