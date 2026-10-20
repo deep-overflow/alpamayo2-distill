@@ -5,7 +5,8 @@ Scores (importance_distill.py stats, each vector divided by its mean so tasks we
                generated-position statistics
   expert tower the expert task
 Selection, per kept layer unless noted:
-  layers   0, 1, 2 always (deepstack), then the highest Block Influence (VLM + expert)
+  layers   0, 1, 2 always (deepstack), then the highest drop-one task-loss increase
+           (--depth, depth_importance.py) or, without it, the highest Block Influence
   kv       highest summed head score of the group's query heads (VLM + expert)
   q, q_e   highest head scores inside each kept group
   mlp      highest MLP channel scores
@@ -25,6 +26,7 @@ Usage:
 
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -41,6 +43,10 @@ ARCHS = {  # L, d, nQ, nKV, m, d_e, nQ_e, m_e
     "C-deep": (28, 896, 8, 4, 3584, 384, 4, 1536),
     "C-balanced": (20, 1024, 16, 4, 4096, 384, 4, 1536),
     "C-wide": (14, 1280, 16, 4, 5120, 512, 4, 2048),
+    # the plan's sizes assumed V' ~ 24k; at V' = 4,885 the MLPs grow to the same ~466M each
+    "C-deep-v2": (28, 896, 8, 4, 4096, 384, 4, 1536),
+    "C-balanced-v2": (20, 1024, 16, 4, 4864, 384, 4, 1536),
+    "C-wide-v2": (14, 1280, 16, 4, 5632, 512, 4, 2048),
 }
 
 
@@ -54,7 +60,7 @@ def vlm_score(st, key):
     return np.mean(parts, axis=0)
 
 
-def build_spec(st, src_cfg, arch):
+def build_spec(st, src_cfg, arch, depth=None):
     L, d, nq, nkv, m, d_e, nq_e, m_e = arch
     t, e = src_cfg["vlm_config"]["text_config"], src_cfg["expert_config"]["llm_config"]
     rep, rep_e = t["num_attention_heads"] // t["num_key_value_heads"], \
@@ -64,7 +70,13 @@ def build_spec(st, src_cfg, arch):
         "target heads per KV group must divide evenly and not exceed the source's"
 
     bi = nrm(vlm_score(st, "bi")) + nrm(st["expert/exp/all/bi"])  # (L_src,)
-    rest = [i for i in np.argsort(-bi) if i not in (0, 1, 2)]
+    if depth is None:  # Block Influence only
+        rank = np.argsort(-bi)
+    else:  # drop-one task-loss increase (depth_importance.py), BI breaks ties
+        score = np.full(len(bi), np.inf)
+        score[depth["layers"]] = depth["score"]
+        rank = np.lexsort((-bi, -score))
+    rest = [i for i in rank if i not in (0, 1, 2)]
     layers = sorted([0, 1, 2] + [int(i) for i in rest[:L - 3]])
 
     head, head_e = vlm_score(st, "head"), nrm(st["expert/exp/all/head"])  # (L_src, nQ)
@@ -113,6 +125,8 @@ def main():
     ap.add_argument("--name", required=True)
     ap.add_argument("--source", default=None, help="checkpoint dir to slice (default: teacher)")
     ap.add_argument("--stats", default=str(REPO / "outputs" / "distill_importance_teacher" / "stats.npz"))
+    ap.add_argument("--depth", default=None,
+                    help="depth.npz from depth_importance.py; layers then follow its drop-one score")
     ap.add_argument("--vocab-sets", nargs="*", default=["train_10k", "dev_238"])
     ap.add_argument("--vocab-top", type=int, default=8)
     args = ap.parse_args()
@@ -120,10 +134,11 @@ def main():
     src = args.source or pl.TEACHER_SNAPSHOT
     src_cfg = json.loads((Path(src) / "config.json").read_text())
     st = dict(np.load(args.stats))
-    spec = build_spec(st, src_cfg, ARCHS[args.arch])
+    depth = dict(np.load(args.depth)) if args.depth else None
+    spec = build_spec(st, src_cfg, ARCHS[args.arch], depth)
     if args.source is None:  # vocabulary pruning happens once, when leaving the teacher
         spec.vocab = build_vocab(src_cfg, args.vocab_sets, args.vocab_top)
-    spec.meta = {"arch": args.arch, "source": src, "stats": args.stats,
+    spec.meta = {"arch": args.arch, "source": src, "stats": args.stats, "depth": args.depth,
                  "vocab_sets": args.vocab_sets if args.source is None else None}
     spec.validate(src_cfg)
 
@@ -132,6 +147,8 @@ def main():
     cfg = pl.save_student(out, src_cfg, spec, sd)
     cfg["cotrain_expert_vlm"] = True  # the release default freezes the VLM
     (out / "config.json").write_text(json.dumps(cfg, indent=2))
+    if spec.vocab is None and (Path(src) / "vocab_map.npy").exists():  # inherit the source's ids
+        shutil.copy(Path(src) / "vocab_map.npy", out / "vocab_map.npy")
     counts = pl.count_params(sd)
     formula = pl.formula_params(spec, V=len(spec.vocab) if spec.vocab is not None else
                                 src_cfg["vlm_config"]["text_config"]["vocab_size"])

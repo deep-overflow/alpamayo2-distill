@@ -105,8 +105,11 @@ class ActStats:
     def _bi(self, tower, i):
         def hook(module, args, kwargs, out):
             if self._active(tower):
-                h_in = (kwargs["hidden_states"] if "hidden_states" in kwargs else args[0])[0]
                 h_out = (out[0] if isinstance(out, tuple) else out)[0]
+                # accelerate moves inputs inside the wrapped forward, so the hook still sees
+                # the hidden state on the previous layer's card
+                h_in = (kwargs["hidden_states"] if "hidden_states" in kwargs else args[0])[0]
+                h_in = h_in.to(h_out.device)
                 cos = torch.nn.functional.cosine_similarity(h_in.float(), h_out.float(), dim=-1)
                 self._add(tower, "bi", i, (1 - cos)[:, None])  # (L_tok, 1)
         return hook

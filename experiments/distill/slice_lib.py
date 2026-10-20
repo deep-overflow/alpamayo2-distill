@@ -161,11 +161,13 @@ def required_ids(tcfg):
     return np.unique(np.concatenate([qwen_special, hist, markers]))
 
 
-def remap_ids(spec):
-    """old id -> new id (-1 for dropped), or None when the vocab is kept whole."""
+def remap_ids(spec, size):
+    """old id -> new id (-1 for dropped) over the source's whole vocabulary of `size` ids, or
+    None when the vocab is kept whole. (Sized by the source vocab, not the largest kept id:
+    the teacher's top-k can name any id, padding ids included.)"""
     if spec.vocab is None:
         return None
-    m = np.full(int(spec.vocab[-1]) + 1, -1, dtype=np.int64)
+    m = np.full(max(int(size), int(spec.vocab[-1]) + 1), -1, dtype=np.int64)
     m[spec.vocab] = np.arange(len(spec.vocab))
     return m
 
@@ -183,7 +185,7 @@ def student_config(tcfg, spec):
     c["expert_config"]["expert_update_cfg"] = {"head_dim": HD, "hidden_size": n["d_e"],
                                                "intermediate_size": n["m_e"],
                                                "num_attention_heads": n["nq_e"]}
-    m = remap_ids(spec)
+    m = remap_ids(spec, t["vocab_size"])
     if m is not None:
         t["vocab_size"] = e["vocab_size"] = n["V"]
 
@@ -258,6 +260,8 @@ def slice_weights(tw, spec):
 
     sd[f"{EXP}.norm.weight"] = _ix(tw(f"{EXP}.norm.weight"), rows=d_e)
     for name in tw.names():
+        if name.endswith(".freqs"):  # Fourier buffers a trained student's checkpoint carries;
+            continue                  # the model rebuilds them from its config
         if name.startswith("expert.action_in_proj."):
             if name.startswith(("expert.action_in_proj.encoder.trunk.6.", "expert.action_in_proj.norm.")):
                 sd[name] = _ix(tw(name), rows=d_e)  # last trunk Linear (d_e, 512) + LayerNorm(d_e)
@@ -310,7 +314,7 @@ def save_student(out_dir, tcfg, spec, sd):
     for f in COPY_FILES:
         shutil.copy(Path(TEACHER_SNAPSHOT) / f, out / f)
     spec.save(out / "prune_spec.npz")
-    m = remap_ids(spec)
+    m = remap_ids(spec, tcfg["vlm_config"]["text_config"]["vocab_size"])
     if m is not None:
         np.save(out / "vocab_map.npy", m)
     return cfg

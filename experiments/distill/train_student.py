@@ -18,7 +18,7 @@ to the init checkpoint; config / metrics / summary / plots go to outputs/<exp-id
 
 Usage:
   source experiments/oodval/env.sh
-  CUDA_VISIBLE_DEVICES=1,2,3 torchrun --nproc_per_node 3 experiments/distill/train_student.py \
+  CUDA_VISIBLE_DEVICES=1,2,3 .venv/bin/torchrun --nproc_per_node 3 experiments/distill/train_student.py \
       --init /mnt/nvme1n1/ad_vla/outputs/chan/a2_distill/s1/init --exp-id distill_s1 \
       --epochs 3 --lr 5e-5
 """
@@ -49,12 +49,54 @@ REPO = Path(__file__).resolve().parents[2]
 VISION_KEYS = dd.VISION_KEYS
 
 
+class SharedVision:
+    """Run the frozen ViT blocks once per clip and only the trainable mergers per sequence.
+
+    The driving and detection sequences of a clip carry the same 24 frames, and every ViT
+    block is frozen, so the block outputs (final + the deepstack taps) are computed without
+    grad on the first sequence and reused on the second. The body is
+    Qwen3VLVisionModel.forward split at the mergers.
+    """
+
+    def __init__(self, visual):
+        self.v, self.feats = visual, None
+        visual.forward = self.forward
+
+    @torch.no_grad()
+    def _blocks(self, hidden_states, grid_thw, **kwargs):
+        v = self.v
+        h = v.patch_embed(hidden_states)
+        h = h + v.fast_pos_embed_interpolate(grid_thw)
+        rot = v.rot_pos_emb(grid_thw)
+        seq_len, _ = h.size()
+        h = h.reshape(seq_len, -1)
+        rot = rot.reshape(seq_len, -1)
+        emb = torch.cat((rot, rot), dim=-1)
+        pos = (emb.cos(), emb.sin())
+        cu = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
+            dim=0, dtype=torch.int32)
+        cu = F.pad(cu, (1, 0), value=0)
+        taps = []
+        for i, blk in enumerate(v.blocks):
+            h = blk(h, cu_seqlens=cu, position_embeddings=pos, **kwargs)
+            if i in v.deepstack_visual_indexes:
+                taps.append(h)
+        return h, taps
+
+    def forward(self, hidden_states, grid_thw, **kwargs):
+        if self.feats is None:
+            self.feats = self._blocks(hidden_states, grid_thw, **kwargs)
+        h, taps = self.feats
+        return self.v.merger(h), [m(t) for m, t in zip(self.v.deepstack_merger_list, taps)]
+
+
 class Step(torch.nn.Module):
-    """Wraps the student so that one forward computes every loss of one clip."""
+    """Wraps the student so that every model call of a step goes through FSDP's root."""
 
     def __init__(self, model, args):
         super().__init__()
         self.model, self.args = model, args
+        self.vision = SharedVision(model.vlm.model.visual)
 
     def seq_losses(self, seq, dev):
         ids = seq["input_ids"].to(dev)  # (1, L)
@@ -70,20 +112,29 @@ class Step(torch.nn.Module):
         kl = (kd_p * (torch.log(kd_p.clamp(min=1e-12)) - logq.gather(1, kd_ids))).sum(-1).mean()
         return ce, kl, out
 
-    def forward(self, item):
+    def forward(self, item, task):
+        """Loss of one of the clip's two sequences; the caller backpropagates each separately
+        so only one sequence's activations are alive at a time. -> (loss, parts (5,))."""
         dev = torch.device("cuda", torch.cuda.current_device())
         a = self.args
-        ce_d, kl_d, out = self.seq_losses(item["driving"], dev)
-        traj = {k: v.to(dev) for k, v in item["driving"]["traj"].items()}
-        fm = torch.stack([dd.expert_fm(self.model, traj, out) for _ in range(a.n_fm)]).mean()
-        del out
-        ce_t, kl_t, _ = self.seq_losses(item["det"], dev)
-        loss = a.w_ce * (ce_d + ce_t) + a.w_kd * (kl_d + kl_t) + a.w_fm * fm
-        parts = torch.stack([ce_d, kl_d, ce_t, kl_t, fm]).detach()
-        return loss, parts
+        zero = torch.zeros((), device=dev)
+        if task == TASKS[0]:  # a new clip: its frozen ViT features are computed once
+            self.vision.feats = None
+        if task == "driving":
+            ce, kl, out = self.seq_losses(item["driving"], dev)
+            traj = {k: v.to(dev) for k, v in item["driving"]["traj"].items()}
+            fm = torch.stack([dd.expert_fm(self.model, traj, out) for _ in range(a.n_fm)]).mean()
+            loss = a.w_ce * ce + a.w_kd * kl + a.w_fm * fm
+            parts = torch.stack([ce, kl, zero, zero, fm])
+        else:
+            ce, kl, _ = self.seq_losses(item["det"], dev)
+            loss = a.w_ce * ce + a.w_kd * kl
+            parts = torch.stack([zero, zero, ce, kl, zero])
+        return loss, parts.detach()
 
 
 PART_NAMES = ("ce_drv", "kl_drv", "ce_det", "kl_det", "fm")
+TASKS = ("driving", "det")
 
 
 def build(args, rank):
@@ -100,7 +151,11 @@ def build(args, rank):
     for layer in model.expert.expert.layers:
         fully_shard(layer, mp_policy=mp)
     step = Step(model, args)
-    fully_shard(step, mp_policy=mp)
+    # the root must not cast its inputs: trajectories (cholesky in traj_to_action), KD
+    # probabilities and pixel values stay as built; autocast handles the compute dtype
+    fully_shard(step, mp_policy=MixedPrecisionPolicy(param_dtype=torch.bfloat16,
+                                                     reduce_dtype=torch.float32,
+                                                     cast_forward_inputs=False))
     n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
     n_all = sum(p.numel() for p in model.parameters())
     if rank == 0:
@@ -127,11 +182,17 @@ def lr_at(step, total, warmup, base):
 def evaluate(step_mod, items, ds, rank, world):
     step_mod.eval()
     tot, n = torch.zeros(len(PART_NAMES) + 1, device="cuda"), 0
-    for i in range(rank, len(items), world):
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            loss, parts = step_mod(ds[i])
-        tot += torch.cat([loss.detach().view(1), parts])
-        n += 1
+    # every rank must run the same number of forwards (each one issues FSDP all-gathers):
+    # ranks short of items repeat item 0 with weight 0
+    for k in range(math.ceil(len(items) / world)):
+        i = rank + k * world
+        w = 1.0 if i < len(items) else 0.0
+        item = ds[i if w else 0]
+        for task in TASKS:
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                loss, parts = step_mod(item, task)
+            tot += w * torch.cat([loss.detach().view(1), parts])
+        n += int(w)
     cnt = torch.tensor([n], device="cuda", dtype=torch.float32)
     dist.all_reduce(tot)
     dist.all_reduce(cnt)
@@ -192,6 +253,8 @@ def main():
     ap.add_argument("--w-fm", type=float, default=1.0)
     ap.add_argument("--n-fm", type=int, default=4)
     ap.add_argument("--eval-every", type=int, default=100)
+    ap.add_argument("--patience", type=int, default=0,
+                    help="stop after this many dev evaluations without improvement (0 = off)")
     ap.add_argument("--dev-limit", type=int, default=None)
     ap.add_argument("--train-limit", type=int, default=None)
     ap.add_argument("--workers", type=int, default=6)
@@ -237,6 +300,7 @@ def main():
                                          num_workers=args.workers, persistent_workers=True,
                                          prefetch_factor=2)
     metrics, best, t0, step, epoch = [], float("inf"), time.time(), 0, 0
+    stale = 0  # dev evaluations since the last improvement
     run = torch.zeros(len(PART_NAMES), device="cuda")
     n_run, done = 0, False
     while not done:
@@ -254,11 +318,12 @@ def main():
             for g in opt.param_groups:
                 g["lr"] = lr_at(step, total, args.warmup, args.lr)
             for j, item in enumerate(micro):
-                step_mod.set_requires_gradient_sync(j == accum - 1)
-                with torch.autocast("cuda", dtype=torch.bfloat16):
-                    loss, parts = step_mod(item)
-                (loss / accum).backward()
-                run += parts
+                for task in TASKS:  # backward per sequence: one sequence's graph at a time
+                    step_mod.set_requires_gradient_sync(j == accum - 1 and task == TASKS[-1])
+                    with torch.autocast("cuda", dtype=torch.bfloat16):
+                        loss, parts = step_mod(item, task)
+                    (loss / accum).backward()
+                    run += parts
                 n_run += 1
             gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
@@ -285,12 +350,19 @@ def main():
                 if rank == 0:
                     print(json.dumps(ev), flush=True)
                 if ev["loss"] < best:
-                    best = ev["loss"]
+                    best, stale = ev["loss"], 0
                     save_weights(model, args.init, ckpt / "best", rank)
+                else:
+                    stale += 1  # dev loss is all-reduced, so every rank stops together
+                    if args.patience and stale >= args.patience:
+                        done = True
+                        if rank == 0:
+                            print(f"early stop at step {step}: no dev improvement in {stale} "
+                                  "evaluations", flush=True)
                 if rank == 0:
                     (out / "metrics.json").write_text(json.dumps(metrics, indent=1))
                     plot_curves(metrics, out / "curves.png")
-            if step >= total:
+            if done or step >= total:
                 done = True
                 break
         epoch += 1
@@ -299,7 +371,7 @@ def main():
     if rank == 0:
         devs = [m for m in metrics if m["kind"] == "dev"]
         b = min(devs, key=lambda m: m["loss"])
-        lines = [(f"{args.exp_id}: {total} steps ({total / max(steps_per_epoch, 1):.2f} epochs), "
+        lines = [(f"{args.exp_id}: {step} of {total} steps ({step / max(steps_per_epoch, 1):.2f} epochs), "
                  f"{(time.time() - t0) / 3600:.2f} h on {world} GPUs"),
                  f"student {n_all / 1e9:.3f}B params ({n_train / 1e9:.3f}B trainable), init {args.init}",
                  f"best dev (step {b['step']}): loss {b['loss']:.4f} | " + ", ".join(
