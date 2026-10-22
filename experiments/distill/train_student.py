@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "oodval"))
 
 import distill_data as dd
+import lidar_lib as ll
 
 from alpamayo2_super.models.alpamayo2_super import Alpamayo2Super
 
@@ -93,17 +94,23 @@ class SharedVision:
 class Step(torch.nn.Module):
     """Wraps the student so that every model call of a step goes through FSDP's root."""
 
-    def __init__(self, model, args):
+    def __init__(self, model, args, lidar=None):
         super().__init__()
         self.model, self.args = model, args
         self.vision = SharedVision(model.vlm.model.visual)
+        self.lidar = lidar  # RangeViT for the camera + LiDAR student, else None
 
-    def seq_losses(self, seq, dev):
+    def seq_losses(self, seq, dev, lidar=None):
         ids = seq["input_ids"].to(dev)  # (1, L)
         n = seq["n_target"]
-        out = self.model.vlm(input_ids=ids, attention_mask=seq["attention_mask"].to(dev),
-                             use_cache="traj" in seq, logits_to_keep=n + 1,
-                             **{k: seq[k].to(dev) for k in VISION_KEYS})
+        if lidar is None:
+            out = self.model.vlm(input_ids=ids, attention_mask=seq["attention_mask"].to(dev),
+                                 use_cache="traj" in seq, logits_to_keep=n + 1,
+                                 **{k: seq[k].to(dev) for k in VISION_KEYS})
+        else:
+            out = ll.lidar_vlm_forward(self.model, self.lidar, ids, seq["attention_mask"].to(dev),
+                                       seq["pixel_values"].to(dev), seq["image_grid_thw"].to(dev),
+                                       lidar, use_cache="traj" in seq, logits_to_keep=n + 1)
         logits = out.logits[0, :-1].float()  # (n, V): predictions of the n target tokens
         tgt = ids[0, -n:]
         ce = F.cross_entropy(logits, tgt)
@@ -120,14 +127,15 @@ class Step(torch.nn.Module):
         zero = torch.zeros((), device=dev)
         if task == TASKS[0]:  # a new clip: its frozen ViT features are computed once
             self.vision.feats = None
+        lidar = ll.lidar_tensors(item["lidar"], dev) if self.lidar is not None else None
         if task == "driving":
-            ce, kl, out = self.seq_losses(item["driving"], dev)
+            ce, kl, out = self.seq_losses(item["driving"], dev, lidar)
             traj = {k: v.to(dev) for k, v in item["driving"]["traj"].items()}
             fm = torch.stack([dd.expert_fm(self.model, traj, out) for _ in range(a.n_fm)]).mean()
             loss = a.w_ce * ce + a.w_kd * kl + a.w_fm * fm
             parts = torch.stack([ce, kl, zero, zero, fm])
         else:
-            ce, kl, _ = self.seq_losses(item["det"], dev)
+            ce, kl, _ = self.seq_losses(item["det"], dev, lidar)
             loss = a.w_ce * ce + a.w_kd * kl
             parts = torch.stack([zero, zero, ce, kl, zero])
         return loss, parts.detach()
@@ -150,17 +158,21 @@ def build(args, rank):
         fully_shard(layer, mp_policy=mp)
     for layer in model.expert.expert.layers:
         fully_shard(layer, mp_policy=mp)
-    step = Step(model, args)
+    lidar = None
+    if args.lidar:  # new modality, trained from scratch; part of the root FSDP unit
+        lidar = ll.RangeViT(out_dim=model.config.vlm_config.text_config.hidden_size)
+    step = Step(model, args, lidar)
     # the root must not cast its inputs: trajectories (cholesky in traj_to_action), KD
     # probabilities and pixel values stay as built; autocast handles the compute dtype
     fully_shard(step, mp_policy=MixedPrecisionPolicy(param_dtype=torch.bfloat16,
                                                      reduce_dtype=torch.float32,
                                                      cast_forward_inputs=False))
-    n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    n_all = sum(p.numel() for p in model.parameters())
+    n_train = sum(p.numel() for p in step.parameters() if p.requires_grad)
+    n_all = sum(p.numel() for p in step.parameters())
+    n_lidar = sum(p.numel() for p in lidar.parameters()) if lidar is not None else 0
     if rank == 0:
-        print(f"student {args.init}: {n_all / 1e9:.3f}B params, {n_train / 1e9:.3f}B trainable",
-              flush=True)
+        print(f"student {args.init}: {n_all / 1e9:.3f}B params, {n_train / 1e9:.3f}B trainable, "
+              f"LiDAR encoder {n_lidar / 1e6:.1f}M", flush=True)
     return model, step, n_all, n_train
 
 
@@ -181,6 +193,9 @@ def lr_at(step, total, warmup, base):
 @torch.no_grad()
 def evaluate(step_mod, items, ds, rank, world):
     step_mod.eval()
+    # fixed flow-matching noise per dev clip, so evaluations differ only by the weights;
+    # the training RNG streams are restored afterwards
+    rng = (torch.get_rng_state(), torch.cuda.get_rng_state(), np.random.get_state())
     tot, n = torch.zeros(len(PART_NAMES) + 1, device="cuda"), 0
     # every rank must run the same number of forwards (each one issues FSDP all-gathers):
     # ranks short of items repeat item 0 with weight 0
@@ -188,6 +203,7 @@ def evaluate(step_mod, items, ds, rank, world):
         i = rank + k * world
         w = 1.0 if i < len(items) else 0.0
         item = ds[i if w else 0]
+        torch.manual_seed(1_000_003 * (i + 1))
         for task in TASKS:
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 loss, parts = step_mod(item, task)
@@ -196,22 +212,36 @@ def evaluate(step_mod, items, ds, rank, world):
     cnt = torch.tensor([n], device="cuda", dtype=torch.float32)
     dist.all_reduce(tot)
     dist.all_reduce(cnt)
+    torch.set_rng_state(rng[0])
+    torch.cuda.set_rng_state(rng[1])
+    np.random.set_state(rng[2])
     step_mod.train()
     vals = (tot / cnt).tolist()
     return {"loss": vals[0], **dict(zip(PART_NAMES, vals[1:]))}
 
 
-def save_weights(model, init_dir, out_dir, rank):
+def save_weights(step_mod, init_dir, out_dir, rank):
+    """bf16 safetensors loadable with Alpamayo2Super.from_pretrained, plus lidar_encoder.safetensors
+    and lidar_config.json for the camera + LiDAR student."""
     from safetensors.torch import save_file
     from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
 
-    sd = get_model_state_dict(model, options=StateDictOptions(full_state_dict=True,
-                                                              cpu_offload=True))
+    sd = get_model_state_dict(step_mod, options=StateDictOptions(full_state_dict=True,
+                                                                 cpu_offload=True))
     if rank == 0:
         out_dir.mkdir(parents=True, exist_ok=True)
-        sd = {k: v.to(torch.bfloat16).contiguous() for k, v in sd.items()}
-        save_file(sd, str(out_dir / "model.safetensors.tmp"), metadata={"format": "pt"})
-        (out_dir / "model.safetensors.tmp").rename(out_dir / "model.safetensors")
+        parts = {"model": {}, "lidar": {}}
+        for k, v in sd.items():
+            head, rest = k.split(".", 1)
+            if head in parts:
+                parts[head][rest] = v.to(torch.bfloat16).contiguous()
+        for name, part in (("model.safetensors", parts["model"]),
+                           ("lidar_encoder.safetensors", parts["lidar"])):
+            if part:
+                save_file(part, str(out_dir / (name + ".tmp")), metadata={"format": "pt"})
+                (out_dir / (name + ".tmp")).rename(out_dir / name)
+        if parts["lidar"]:
+            (out_dir / "lidar_config.json").write_text(json.dumps(step_mod.lidar.config, indent=2))
         for f in Path(init_dir).iterdir():
             if f.name != "model.safetensors" and f.is_file():
                 shutil.copy(f, out_dir / f.name)
@@ -253,6 +283,8 @@ def main():
     ap.add_argument("--w-fm", type=float, default=1.0)
     ap.add_argument("--n-fm", type=int, default=4)
     ap.add_argument("--eval-every", type=int, default=100)
+    ap.add_argument("--lidar", action="store_true",
+                    help="camera + LiDAR student: range-image tokens (lidar_lib.RangeViT)")
     ap.add_argument("--patience", type=int, default=0,
                     help="stop after this many dev evaluations without improvement (0 = off)")
     ap.add_argument("--dev-limit", type=int, default=None)
@@ -273,13 +305,13 @@ def main():
 
     vmap_p = Path(args.init) / "vocab_map.npy"
     builder = dd.SeqBuilder(vocab_map=np.load(vmap_p) if vmap_p.exists() else None)
-    train_items = dd.labelled_items("train_10k")[:args.train_limit]
-    dev_items = dd.labelled_items("dev_238")[:args.dev_limit]
-    train_ds = dd.DistillDataset("train_10k", train_items, builder)
-    dev_ds = dd.DistillDataset("dev_238", dev_items, builder)
+    train_items = dd.labelled_items("train_10k", lidar=args.lidar)[:args.train_limit]
+    dev_items = dd.labelled_items("dev_238", lidar=args.lidar)[:args.dev_limit]
+    train_ds = dd.DistillDataset("train_10k", train_items, builder, lidar=args.lidar)
+    dev_ds = dd.DistillDataset("dev_238", dev_items, builder, lidar=args.lidar)
 
-    model, step_mod, n_all, n_train = build(args, rank)
-    opt = torch.optim.AdamW(param_groups(model, args.wd), lr=args.lr, betas=(0.9, 0.95),
+    _, step_mod, n_all, n_train = build(args, rank)
+    opt = torch.optim.AdamW(param_groups(step_mod, args.wd), lr=args.lr, betas=(0.9, 0.95),
                             fused=True)
     accum = max(1, round(args.global_batch / world))
     steps_per_epoch = len(train_items) // (accum * world)
@@ -325,7 +357,7 @@ def main():
                     (loss / accum).backward()
                     run += parts
                 n_run += 1
-            gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            gnorm = torch.nn.utils.clip_grad_norm_(step_mod.parameters(), 1.0)
             opt.step()
             opt.zero_grad(set_to_none=True)
             step += 1
@@ -351,7 +383,7 @@ def main():
                     print(json.dumps(ev), flush=True)
                 if ev["loss"] < best:
                     best, stale = ev["loss"], 0
-                    save_weights(model, args.init, ckpt / "best", rank)
+                    save_weights(step_mod, args.init, ckpt / "best", rank)
                 else:
                     stale += 1  # dev loss is all-reduced, so every rank stops together
                     if args.patience and stale >= args.patience:
@@ -367,7 +399,7 @@ def main():
                 break
         epoch += 1
 
-    save_weights(model, args.init, ckpt / "last", rank)
+    save_weights(step_mod, args.init, ckpt / "last", rank)
     if rank == 0:
         devs = [m for m in metrics if m["kind"] == "dev"]
         b = min(devs, key=lambda m: m["loss"])

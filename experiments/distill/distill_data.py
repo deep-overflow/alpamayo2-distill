@@ -63,6 +63,16 @@ class SeqBuilder:
         assert (new >= 0).all(), "id outside the student vocabulary"
         return new
 
+    def _insert_lidar(self, tok):
+        """Teacher-space ids with the 258-token LiDAR block after the last camera image."""
+        import lidar_lib as ll
+
+        vc = self.cfg.vlm_config
+        tok["input_ids"], _ = ll.insert_lidar_tokens(tok["input_ids"], vc.vision_start_token_id,
+                                                     vc.vision_end_token_id, vc.video_token_id)
+        tok["attention_mask"] = torch.ones_like(tok["input_ids"])
+        return tok
+
     def _finish(self, tok, target_ids):
         prompt_len = tok["input_ids"].shape[1]
         ids = tok["input_ids"]
@@ -73,19 +83,23 @@ class SeqBuilder:
                 **{k: tok[k] for k in VISION_KEYS}, "prompt_len": prompt_len,
                 "n_target": 0 if target_ids is None else len(target_ids)}
 
-    def driving(self, data, target_ids=None):
+    def driving(self, data, target_ids=None, lidar=False):
         tok = self._tokenize(data, build_text_task_messages(data, self.cfg, "meta_action"))
         traj = {"ego_history_xyz": data["ego_history_xyz"], "ego_history_rot": data["ego_history_rot"]}
         tok["input_ids"] = fuse_traj_tokens(self.hist_tok, self.fut_tok, tok["input_ids"], traj,
                                             self.cfg.traj_ids)
+        if lidar:
+            tok = self._insert_lidar(tok)
         seq = self._finish(tok, target_ids)
         seq["traj"] = {**traj, "ego_future_xyz": data["ego_future_xyz"],
                        "ego_future_rot": data["ego_future_rot"]}
         return seq
 
-    def det(self, data, target_ids=None, question=DET_QUESTION):
+    def det(self, data, target_ids=None, question=DET_QUESTION, lidar=False):
         d = {**data, "question": question}
         tok = self._tokenize(d, build_text_task_messages(d, self.cfg, "vqa"))
+        if lidar:
+            tok = self._insert_lidar(tok)
         return self._finish(tok, target_ids)
 
     def kd_targets(self, label):
@@ -137,8 +151,8 @@ def load_label(set_name, task, clip_id, t0_us):
 class DistillDataset(torch.utils.data.Dataset):
     """One item = one clip: its driving and detection sequences with KD targets."""
 
-    def __init__(self, set_name, items, builder):
-        self.set_name, self.items, self.b = set_name, list(items), builder
+    def __init__(self, set_name, items, builder, lidar=False):
+        self.set_name, self.items, self.b, self.lidar = set_name, list(items), builder, lidar
 
     def __len__(self):
         return len(self.items)
@@ -147,17 +161,22 @@ class DistillDataset(torch.utils.data.Dataset):
         clip_id, t0_us = self.items[i]
         data = dc.load_cached(dc.path_for(clip_id, t0_us, self.set_name))
         out = {"clip_id": clip_id, "t0_us": t0_us}
+        if self.lidar:
+            import build_lidar_distill as bl
+
+            out["lidar"] = bl.load_cached(bl.path_for(clip_id, t0_us, self.set_name))
         for task in ("driving", "det"):
             lab = load_label(self.set_name, task, clip_id, t0_us)
-            seq = (self.b.driving(data, lab["gen_ids"]) if task == "driving"
-                   else self.b.det(data, lab["gen_ids"]))
+            seq = (self.b.driving(data, lab["gen_ids"], lidar=self.lidar) if task == "driving"
+                   else self.b.det(data, lab["gen_ids"], lidar=self.lidar))
             seq["kd_ids"], seq["kd_p"] = self.b.kd_targets(lab)
             out[task] = seq
         return out
 
 
-def labelled_items(set_name, tasks=("driving", "det")):
-    """(clip_id, t0_us) of the set's manifest that have a cache and every requested label."""
+def labelled_items(set_name, tasks=("driving", "det"), lidar=False):
+    """(clip_id, t0_us) of the set's manifest that have a cache (and a LiDAR cache when asked)
+    and every requested label."""
     import pandas as pd
 
     man = pd.read_parquet(REPO / "outputs" / "distill_sets" / f"{set_name}.parquet")
@@ -165,6 +184,11 @@ def labelled_items(set_name, tasks=("driving", "det")):
     for r in man.itertuples():
         if not dc.path_for(r.clip_id, r.t0_us, set_name).exists():
             continue
+        if lidar:
+            import build_lidar_distill as bl
+
+            if not bl.path_for(r.clip_id, r.t0_us, set_name).exists():
+                continue
         if all((TEACHER_LABELS / set_name / t / f"{r.clip_id}__t0_{int(r.t0_us)}.npz").exists()
                for t in tasks):
             keep.append((r.clip_id, int(r.t0_us)))
