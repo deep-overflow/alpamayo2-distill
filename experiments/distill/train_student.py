@@ -4,7 +4,8 @@ Per clip (one micro-batch), two teacher-forced sequences (distill_data.DistillDa
   driving  CE on the teacher's CoC + meta-action tokens, KL to the teacher's top-64
            distribution at the same steps, and `--n-fm` flow-matching draws of the expert on
            the GT future over this sequence's KV cache
-  det      CE + KL on the teacher's detection JSON
+  det      CE + KL on the teacher's detection JSON (`--det-source gt`: CE only, on the
+           projected obstacle.offline boxes of gt_det_labels.py)
 loss = w_ce * (CE_drv + CE_det) + w_kd * (KL_drv + KL_det) + w_fm * mean(FM)
 
 The ViT blocks stay frozen (their outputs feed the trainable mergers, whose last layer was
@@ -115,6 +116,8 @@ class Step(torch.nn.Module):
         tgt = ids[0, -n:]
         ce = F.cross_entropy(logits, tgt)
         logq = F.log_softmax(logits, dim=-1)  # (n, V)
+        if "kd_ids" not in seq:  # GT det answer: no teacher distribution
+            return ce, torch.zeros((), device=dev), out
         kd_ids, kd_p = seq["kd_ids"].to(dev), seq["kd_p"].to(dev)  # (n, k)
         kl = (kd_p * (torch.log(kd_p.clamp(min=1e-12)) - logq.gather(1, kd_ids))).sum(-1).mean()
         return ce, kl, out
@@ -285,6 +288,8 @@ def main():
     ap.add_argument("--eval-every", type=int, default=100)
     ap.add_argument("--lidar", action="store_true",
                     help="camera + LiDAR student: range-image tokens (lidar_lib.RangeViT)")
+    ap.add_argument("--det-source", choices=("a2", "gt"), default="a2",
+                    help="det target: A2's answer (CE + KL) or the projected auto-label boxes (CE)")
     ap.add_argument("--patience", type=int, default=0,
                     help="stop after this many dev evaluations without improvement (0 = off)")
     ap.add_argument("--dev-limit", type=int, default=None)
@@ -305,10 +310,11 @@ def main():
 
     vmap_p = Path(args.init) / "vocab_map.npy"
     builder = dd.SeqBuilder(vocab_map=np.load(vmap_p) if vmap_p.exists() else None)
-    train_items = dd.labelled_items("train_10k", lidar=args.lidar)[:args.train_limit]
-    dev_items = dd.labelled_items("dev_238", lidar=args.lidar)[:args.dev_limit]
-    train_ds = dd.DistillDataset("train_10k", train_items, builder, lidar=args.lidar)
-    dev_ds = dd.DistillDataset("dev_238", dev_items, builder, lidar=args.lidar)
+    src = args.det_source
+    train_items = dd.labelled_items("train_10k", lidar=args.lidar, det_source=src)[:args.train_limit]
+    dev_items = dd.labelled_items("dev_238", lidar=args.lidar, det_source=src)[:args.dev_limit]
+    train_ds = dd.DistillDataset("train_10k", train_items, builder, lidar=args.lidar, det_source=src)
+    dev_ds = dd.DistillDataset("dev_238", dev_items, builder, lidar=args.lidar, det_source=src)
 
     _, step_mod, n_all, n_train = build(args, rank)
     opt = torch.optim.AdamW(param_groups(step_mod, args.wd), lr=args.lr, betas=(0.9, 0.95),

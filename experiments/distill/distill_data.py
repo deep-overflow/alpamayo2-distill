@@ -11,7 +11,8 @@ teacher_lib builds prompts, and only then remapped to a pruned student's vocabul
 
 `DistillDataset` pairs the cached frames with the P1 teacher labels and returns both
 sequences of one clip plus the teacher's top-64 distribution (remapped, renormalised over
-the ids the student keeps) at every target position.
+the ids the student keeps) at every target position. With `det_source="gt"` the det target is
+the projected obstacle.offline answer (gt_det_labels.py) and carries no KD targets.
 """
 
 import json
@@ -31,6 +32,7 @@ from alpamayo2_super.text_tasks import build_text_task_messages
 
 REPO = Path(__file__).resolve().parents[2]
 TEACHER_LABELS = REPO / "outputs" / "distill_teacher"
+GT_DET_LABELS = REPO / "outputs" / "distill_gtdet"
 DET_QUESTION = PROMPTS["p2_release_style"]
 VISION_KEYS = ("pixel_values", "image_grid_thw")
 
@@ -148,11 +150,17 @@ def load_label(set_name, task, clip_id, t0_us):
     return out
 
 
+def label_path(set_name, task, clip_id, t0_us, det_source="a2"):
+    root = GT_DET_LABELS if task == "det" and det_source == "gt" else TEACHER_LABELS
+    return root / set_name / task / f"{clip_id}__t0_{int(t0_us)}.npz"
+
+
 class DistillDataset(torch.utils.data.Dataset):
     """One item = one clip: its driving and detection sequences with KD targets."""
 
-    def __init__(self, set_name, items, builder, lidar=False):
+    def __init__(self, set_name, items, builder, lidar=False, det_source="a2"):
         self.set_name, self.items, self.b, self.lidar = set_name, list(items), builder, lidar
+        self.det_source = det_source
 
     def __len__(self):
         return len(self.items)
@@ -166,6 +174,10 @@ class DistillDataset(torch.utils.data.Dataset):
 
             out["lidar"] = bl.load_cached(bl.path_for(clip_id, t0_us, self.set_name))
         for task in ("driving", "det"):
+            if task == "det" and self.det_source == "gt":
+                ids = np.load(label_path(self.set_name, task, clip_id, t0_us, "gt"))["gen_ids"]
+                out[task] = self.b.det(data, ids, lidar=self.lidar)
+                continue
             lab = load_label(self.set_name, task, clip_id, t0_us)
             seq = (self.b.driving(data, lab["gen_ids"], lidar=self.lidar) if task == "driving"
                    else self.b.det(data, lab["gen_ids"], lidar=self.lidar))
@@ -174,7 +186,7 @@ class DistillDataset(torch.utils.data.Dataset):
         return out
 
 
-def labelled_items(set_name, tasks=("driving", "det"), lidar=False):
+def labelled_items(set_name, tasks=("driving", "det"), lidar=False, det_source="a2"):
     """(clip_id, t0_us) of the set's manifest that have a cache (and a LiDAR cache when asked)
     and every requested label."""
     import pandas as pd
@@ -189,7 +201,6 @@ def labelled_items(set_name, tasks=("driving", "det"), lidar=False):
 
             if not bl.path_for(r.clip_id, r.t0_us, set_name).exists():
                 continue
-        if all((TEACHER_LABELS / set_name / t / f"{r.clip_id}__t0_{int(r.t0_us)}.npz").exists()
-               for t in tasks):
+        if all(label_path(set_name, t, r.clip_id, r.t0_us, det_source).exists() for t in tasks):
             keep.append((r.clip_id, int(r.t0_us)))
     return keep

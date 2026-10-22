@@ -13,6 +13,8 @@ Metrics per set:
   latency     prefill / CoC generation / denoising / detection seconds per sample (students)
 Paired comparisons (bootstrap 95% CI of the mean difference, 2,000 resamples) on the clips
 both models have: every student vs a2, and --pair A B (e.g. lidar_s2 cam_s2).
+Reference boxes: --refboxes v1 = project_obstacles (`keep`, outputs/distill_p4/), v2 =
+gt_det_labels (`keep_v2`: LiDAR-visible, three classes; outputs/distill_p4_v2/).
 
 Usage:
   python experiments/distill/analyze_p4.py --students cam_s2 lidar_s2 --pair lidar_s2 cam_s2
@@ -193,12 +195,18 @@ def main():
     ap.add_argument("--sets", nargs="+", default=["val_500", "ood_262"])
     ap.add_argument("--students", nargs="*", default=[])
     ap.add_argument("--pair", nargs=2, default=None, metavar=("A", "B"))
+    ap.add_argument("--refboxes", choices=("v1", "v2"), default="v1")
     args = ap.parse_args()
-    OUT.mkdir(parents=True, exist_ok=True)
+    out = OUT if args.refboxes == "v1" else OUT.with_name(OUT.name + "_v2")
+    out.mkdir(parents=True, exist_ok=True)
     metrics, lines = {}, []
     for s in args.sets:
         models = {"a2": load_a2(s), "a15": load_a15(s), **{t: load_student(t, s) for t in args.students}}
-        ref = pd.read_parquet(REPO / "outputs" / "distill_refboxes" / f"{s}.parquet")
+        if args.refboxes == "v1":
+            ref = pd.read_parquet(REPO / "outputs" / "distill_refboxes" / f"{s}.parquet")
+        else:
+            ref = pd.read_parquet(REPO / "outputs" / "distill_gtboxes" / f"{s}.parquet")
+            ref = ref.assign(keep=ref.keep_v2)
         m = metrics[s] = {}
         per = {}
         for name, rows in models.items():
@@ -239,8 +247,8 @@ def main():
                 lines.append(f"{name:18s} n={v['n']} " + " ".join(
                     f"{k} {d['mean_diff']:+.3f} [{d['ci95'][0]:+.3f},{d['ci95'][1]:+.3f}]"
                     for k, d in v.items() if k != "n"))
-    (OUT / "metrics.json").write_text(json.dumps(metrics, indent=2, default=float))
-    (OUT / "summary.txt").write_text("\n".join(lines) + "\n")
+    (out / "metrics.json").write_text(json.dumps(metrics, indent=2, default=float))
+    (out / "summary.txt").write_text("\n".join(lines) + "\n")
     print("\n".join(lines))
 
 

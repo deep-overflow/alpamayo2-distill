@@ -120,6 +120,8 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--only-lidar-clips", action="store_true",
                     help="restrict to clips with a LiDAR cache (paired camera / LiDAR comparison)")
+    ap.add_argument("--det-max-new", type=int, default=1400,
+                    help="detection answer length cap (512 for the A2-label students' runs)")
     ap.add_argument("--limit", type=int, default=None, help="first N items per set (smoke)")
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument("--n-shards", type=int, default=1)
@@ -147,7 +149,8 @@ def main():
         od.mkdir(parents=True, exist_ok=True)
         (od / f"config_s{args.shard}of{args.n_shards}.json").write_text(json.dumps({
             **vars(args), "set": set_name, "n_items": len(items), "params": n_params,
-            "lidar": enc is not None, "sampling": {"driving": [0.6, 0.98], "det": [0.1, 1.0]}},
+            "lidar": enc is not None, "sampling": {"driving": [0.6, 0.98], "det": [0.1, 1.0]},
+            "det_max_new": args.det_max_new},
             indent=2))
         t_all = time.time()
         for j, (clip_id, t0_us) in enumerate(items):
@@ -180,7 +183,7 @@ def main():
             t_den = time.time() - t - t_prefill - t_gen
             dseq = b.det(data, None, lidar=enc is not None)
             _, dout = prefill(model, enc, dseq, lidar, device)
-            det, _ = decode(model, dout, im_end, 512, 0.1, 1.0, mask, gen, device)
+            det, _ = decode(model, dout, im_end, args.det_max_new, 0.1, 1.0, mask, gen, device)
             t_det = time.time() - t - t_prefill - t_gen - t_den
             dtxt = extract_text_tokens(b.tokenizer, torch.tensor([inv[drv].tolist()]))
             ttxt = extract_text_tokens(b.tokenizer, torch.tensor([inv[det].tolist()]))

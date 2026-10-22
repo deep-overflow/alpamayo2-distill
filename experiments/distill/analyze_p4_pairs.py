@@ -33,6 +33,7 @@ from det_utils import match, parse_boxes, to_unit1000
 
 REPO = Path(__file__).resolve().parents[2]
 OUT = REPO / "outputs" / "distill_p4"
+BINS = ((0, 30), (30, 60), (60, 999))
 
 
 def per_clip(rows, a2, ref):
@@ -42,12 +43,15 @@ def per_clip(rows, a2, ref):
         refc = ref[(ref.clip_id == k[0]) & (ref.t0_us == k[1])]
         kept, ign = refc[refc.keep], refc[~refc.keep]
         pb = [to_unit1000(b, "qwen_1000") for b in parse_boxes(r["det"])[0]]
-        tp, fp, _ = match(pb, kept[["x1", "y1", "x2", "y2"]].to_numpy(),
-                          ign[["x1", "y1", "x2", "y2"]].to_numpy(), 0.5)
+        tp, fp, mref = match(pb, kept[["x1", "y1", "x2", "y2"]].to_numpy(),
+                             ign[["x1", "y1", "x2", "y2"]].to_numpy(), 0.5)
+        dist = kept.dist_m.to_numpy()
+        bins = {f"tp_{lo}-{hi}m": int(mref[(dist >= lo) & (dist < hi)].sum()) for lo, hi in BINS}
+        bins.update({f"ref_{lo}-{hi}m": int(((dist >= lo) & (dist < hi)).sum()) for lo, hi in BINS})
         tb = [to_unit1000(b, "qwen_1000") for b in parse_boxes(a2[k]["det"])[0]]
         atp, afp, _ = match(pb, np.asarray(tb).reshape(-1, 4), np.zeros((0, 4)), 0.5)
         ms, mt = meta_fields(r["meta"]), meta_fields(a2[k]["meta"])
-        out[k] = {"has_ref": k in have, "tp": tp, "fp": fp, "n_ref": len(kept), "a2_tp": atp, "a2_fp": afp, "a2_n": len(tb),
+        out[k] = {**bins, "has_ref": k in have, "tp": tp, "fp": fp, "n_ref": len(kept), "a2_tp": atp, "a2_fp": afp, "a2_n": len(tb),
                   "meta3": float(all(ms[f] is not None and ms[f] == mt[f] for f in FIELDS)),
                   "rougeL": rouge_l(r["cot"], a2[k]["cot"])}
     return pd.DataFrame(out).T
@@ -75,14 +79,22 @@ def main():
     ap.add_argument("--a", default="lidar_s2")
     ap.add_argument("--b", default="cam_s2")
     ap.add_argument("--sets", nargs="+", default=["val_500", "ood_262"])
+    ap.add_argument("--refboxes", choices=("v1", "v2"), default="v1",
+                    help="v1 project_obstacles `keep`, v2 gt_det_labels `keep_v2` (outputs/distill_p4_v2/)")
     ap.add_argument("--runs", nargs=2, default=["distill_s2_wide_lidar", "distill_s2_wide_final"],
                     help="training exp ids of --a and --b (for the dev-curve plot)")
     args = ap.parse_args()
-    plot_dev(dict(zip((args.a, args.b), args.runs)), OUT / f"dev_curves_{args.a}_vs_{args.b}.png")
+    out = OUT if args.refboxes == "v1" else OUT.with_name(OUT.name + "_v2")
+    out.mkdir(parents=True, exist_ok=True)
+    plot_dev(dict(zip((args.a, args.b), args.runs)), out / f"dev_curves_{args.a}_vs_{args.b}.png")
     res = {}
     for s in args.sets:
         a2 = load_a2(s)
-        ref = pd.read_parquet(REPO / "outputs" / "distill_refboxes" / f"{s}.parquet")
+        if args.refboxes == "v1":
+            ref = pd.read_parquet(REPO / "outputs" / "distill_refboxes" / f"{s}.parquet")
+        else:
+            ref = pd.read_parquet(REPO / "outputs" / "distill_gtboxes" / f"{s}.parquet")
+            ref = ref.assign(keep=ref.keep_v2)
         A, B = load_student(args.a, s), load_student(args.b, s)
         common = sorted(set(A) & set(B) & set(a2))
         da = per_clip({k: A[k] for k in common}, a2, ref)
@@ -94,10 +106,13 @@ def main():
             p = dr.tp.sum() / max(dr.tp.sum() + dr.fp.sum(), 1)
             rc = dr.tp.sum() / max(dr.n_ref.sum(), 1)
             ap_, ar = d.a2_tp.sum() / max(d.a2_tp.sum() + d.a2_fp.sum(), 1), d.a2_tp.sum() / max(d.a2_n.sum(), 1)
-            r[name] = {"det_P": float(p), "det_R": float(rc), "det_F1_vs_a2": float(2 * ap_ * ar / max(ap_ + ar, 1e-9)),
+            r[name] = {"det_P": float(p), "det_R": float(rc), "det_F1": float(2 * p * rc / max(p + rc, 1e-9)),
+                       **{f"det_R_{lo}-{hi}m": float(dr[f"tp_{lo}-{hi}m"].sum() / max(dr[f"ref_{lo}-{hi}m"].sum(), 1))
+                          for lo, hi in BINS},
+                       "det_F1_vs_a2": float(2 * ap_ * ar / max(ap_ + ar, 1e-9)),
                        "meta3_vs_a2": float(d.meta3.mean()), "rougeL_vs_a2": float(d.rougeL.mean())}
-        for key in ("meta3", "rougeL", "tp", "fp"):
-            sel = hr if key in ("tp", "fp") else slice(None)
+        for key in ("meta3", "rougeL", "tp", "fp", *(f"tp_{lo}-{hi}m" for lo, hi in BINS)):
+            sel = hr if key.startswith(("tp", "fp")) else slice(None)
             diff = (da[key][sel] - db[key][sel]).astype(float).to_numpy()
             r[f"{args.a}-{args.b} {key}/clip"] = {"mean": float(diff.mean()), "ci95": boot_ci(diff)}
         # G0e: teacher-generated tokens outside the student vocabulary
@@ -110,7 +125,7 @@ def main():
                 oov += int((vmap[np.clip(g, 0, len(vmap) - 1)] < 0).sum())
         r["G0e_teacher_tokens"] = n
         r["G0e_oov_rate"] = oov / max(n, 1)
-    (OUT / f"pairs_{args.a}_vs_{args.b}.json").write_text(json.dumps(res, indent=2))
+    (out / f"pairs_{args.a}_vs_{args.b}.json").write_text(json.dumps(res, indent=2))
     print(json.dumps(res, indent=2))
 
 
