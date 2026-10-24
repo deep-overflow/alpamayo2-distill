@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>A2 0.5B 증류 결과</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+KR:wght@400;500;600&family=Noto+Serif+KR:wght@600;700&display=swap">
+<style>
+/* Layout: one reading column of a lab report; tables and charts sit in the column, summary box on top */
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --fg: #16191e;
+  --muted: #5b626d;
+  --rule: #dce0e6;
+  --accent: #1d5aa6;
+  --cam: #2a78d6;
+  --lidar: #eb6834;
+  --ref: #a3a9b2;
+  --sig-bg: #fde9e4;
+  --sig-fg: #9a2f14;
+  --ns-bg: #eceff3;
+  --ns-fg: #4b525c;
+  --font-display: "Noto Serif KR", "Nanum Myeongjo", Georgia, serif;
+  --font-body: "IBM Plex Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
+  --font-data: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111317; --surface: #191c21; --fg: #eceef1; --muted: #a2a9b4; --rule: #2d323a;
+    --accent: #79aef2; --cam: #3987e5; --lidar: #d95926; --ref: #69707b;
+    --sig-bg: #44221a; --sig-fg: #ffb8a3; --ns-bg: #262a31; --ns-fg: #b9c0ca;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111317; --surface: #191c21; --fg: #eceef1; --muted: #a2a9b4; --rule: #2d323a;
+  --accent: #79aef2; --cam: #3987e5; --lidar: #d95926; --ref: #69707b;
+  --sig-bg: #44221a; --sig-fg: #ffb8a3; --ns-bg: #262a31; --ns-fg: #b9c0ca;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 15px/1.65 var(--font-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 40px 64px;
+}
+main { max-width: 880px; margin: 0 auto; display: flex; flex-direction: column; gap: 44px; }
+section { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+h1, h2 { font-family: var(--font-display); text-wrap: balance; margin: 0; letter-spacing: -0.01em; }
+h1 { font-size: 1.95rem; line-height: 1.25; }
+h2 { font-size: 1.3rem; line-height: 1.35; padding-bottom: 6px; border-bottom: 1px solid var(--rule); }
+h3 { font-size: 0.98rem; margin: 6px 0 0; font-weight: 600; }
+p { margin: 0; max-width: 68ch; }
+ul { margin: 0; padding-left: 1.2em; max-width: 70ch; }
+li + li { margin-top: 4px; }
+code, .num { font-family: var(--font-data); font-size: 0.88em; }
+.eyebrow { font-family: var(--font-data); font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.meta { color: var(--muted); font-size: 0.86rem; }
+header { display: flex; flex-direction: column; gap: 10px; }
+
+.summary { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 18px 20px; display: flex; flex-direction: column; gap: 10px; }
+.summary ol { margin: 0; padding-left: 1.3em; display: flex; flex-direction: column; gap: 8px; max-width: none; }
+.tag { display: inline-block; font-family: var(--font-data); font-size: 0.7rem; letter-spacing: 0.06em; text-transform: uppercase; padding: 1px 7px; border-radius: 3px; background: var(--ns-bg); color: var(--ns-fg); vertical-align: 2px; }
+
+.flow { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.stage { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 12px 14px; display: flex; flex-direction: column; gap: 4px; min-width: 0; position: relative; }
+.stage .size { font-family: var(--font-data); font-size: 1.35rem; font-weight: 500; }
+.stage .name { font-weight: 600; }
+.stage .how { color: var(--muted); font-size: 0.84rem; line-height: 1.5; }
+.stage + .stage::before { content: "→"; position: absolute; left: -12px; top: 14px; transform: translateX(-50%); color: var(--muted); font-family: var(--font-data); }
+@media (max-width: 620px) {
+  .flow { grid-template-columns: 1fr; }
+  .stage + .stage::before { content: "↓"; left: 18px; top: -16px; transform: none; }
+}
+
+.tbl { overflow-x: auto; min-width: 0; }
+table { border-collapse: collapse; width: 100%; font-size: 0.88rem; font-variant-numeric: tabular-nums; }
+th, td { padding: 6px 10px; border-bottom: 1px solid var(--rule); text-align: right; white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+th { font-weight: 600; color: var(--muted); font-size: 0.8rem; }
+td.num, td .num { font-family: var(--font-data); font-size: 0.86rem; }
+tr.group td { color: var(--muted); font-size: 0.78rem; letter-spacing: 0.05em; padding-top: 12px; border-bottom: none; }
+.sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 7px; vertical-align: 0; }
+.sw.cam { background: var(--cam); } .sw.lidar { background: var(--lidar); } .sw.ref { background: var(--ref); }
+.best { font-weight: 600; }
+.chip { display: inline-block; font-size: 0.74rem; padding: 1px 7px; border-radius: 3px; font-family: var(--font-body); }
+.chip.sig { background: var(--sig-bg); color: var(--sig-fg); }
+.chip.ns { background: var(--ns-bg); color: var(--ns-fg); }
+
+.note { border-left: 2px solid var(--accent); padding: 2px 0 2px 14px; display: flex; flex-direction: column; gap: 6px; }
+.note .label { font-family: var(--font-data); font-size: 0.72rem; letter-spacing: 0.08em; color: var(--accent); text-transform: uppercase; }
+
+.chart { position: relative; min-width: 0; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.chart text { font-family: var(--font-data); font-size: 11px; fill: var(--muted); }
+.chart text.lbl { font-family: var(--font-body); font-size: 12px; fill: var(--fg); }
+.chart text.val { fill: var(--fg); }
+.chart .grid { stroke: var(--rule); stroke-width: 1; }
+.chart .zero { stroke: var(--muted); stroke-width: 1; }
+.chart .hit { fill: transparent; cursor: default; }
+.chart .hit:focus { outline: none; }
+.chart .row:focus-visible .hit, .chart .row:hover .hit { fill: var(--rule); fill-opacity: 0.35; }
+.charts2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+@media (max-width: 620px) { .charts2 { grid-template-columns: 1fr; } }
+.ctitle { font-size: 0.85rem; font-weight: 600; margin-bottom: 2px; }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 0.82rem; color: var(--muted); }
+.tip { position: absolute; pointer-events: none; background: var(--surface); color: var(--fg); border: 1px solid var(--rule); border-radius: 4px; padding: 6px 9px; font-size: 0.78rem; line-height: 1.45; font-family: var(--font-data); box-shadow: 0 4px 14px rgba(0,0,0,0.12); white-space: nowrap; z-index: 2; }
+footer { color: var(--muted); font-size: 0.82rem; display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--rule); padding-top: 14px; }
+footer code { word-break: break-all; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <div class="eyebrow">alpamayo2-distill · 2026-10-15 – 10-20</div>
+  <h1>A2 0.5B 증류 결과</h1>
+  <p class="meta">Alpamayo 2 Super(35.8B)를 ViT + 0.47B student로 줄이고, PhysicalAI-AV 10k clip으로 궤적 · reasoning · 2D detection을 함께 학습했다. LiDAR 입력 추가 실험까지 포함한다.</p>
+</header>
+
+<section class="summary" aria-labelledby="sum-h">
+  <h2 id="sum-h" style="border:none;padding:0">요약 <span class="tag">해석 포함</span></h2>
+  <ol>
+    <li><b>0.99B student</b>(A2의 2.8%)는 세 과제를 모두 수행하지만 A2와의 격차가 크다. minADE@6은 val에서 <span class="num">2.39 m</span>로 A2의 <span class="num">1.16 m</span>보다 나쁘다. detection recall은 <span class="num">0.218</span>로 A2의 <span class="num">0.375</span>보다 낮다(가림 필터 기준).</li>
+    <li><b>2단계 가지치기</b>(A2 → 2.8B → 0.5B)가 A2에서 바로 자르는 one-shot보다 훨씬 낫다(1 epoch dev loss <span class="num">2.50</span> vs <span class="num">4.64</span>). 같은 예산이면 넓고 얕은 구조(14층)가 가장 좋았다.</li>
+    <li><b>궤적 격차</b> 중 약 1/3은 student가 스스로 만든 CoC에서 온다. 나머지 2/3은 작아진 expert와 VLM 특징에서 온다.</li>
+    <li><b>LiDAR</b>(range image)를 더해도 어떤 과제도 유의하게 좋아지지 않았다. detection FP는 오히려 늘었다. reasoning과 detection 라벨이 카메라만 본 A2의 출력이라 LiDAR가 필요 없었던 것이 주원인으로 본다.</li>
+  </ol>
+</section>
+
+<section aria-labelledby="s1-h">
+  <h2 id="s1-h">설정</h2>
+  <div class="flow">
+    <div class="stage">
+      <span class="eyebrow">Teacher</span>
+      <span class="name">Alpamayo 2 Super</span>
+      <span class="size">35.8B</span>
+      <span class="how">VLM 64층(d 5120) + expert 64층(d 1536), vocab 155,776</span>
+    </div>
+    <div class="stage">
+      <span class="eyebrow">S1 · KD 3 epoch</span>
+      <span class="name">중간 student</span>
+      <span class="size">2.81B</span>
+      <span class="how">A2 층 [0,1,2,6,7,24,37,39–63] 32층, d 2048, 16Q/4KV, vocab 4,885 · dev <span class="num">2.252</span></span>
+    </div>
+    <div class="stage">
+      <span class="eyebrow">S2 · KD ≤ 10 epoch</span>
+      <span class="name">최종 student (C-wide)</span>
+      <span class="size">0.99B</span>
+      <span class="how">14층, d 1280, 16Q/4KV, MLP 5632, expert d 512 · ViT 외 0.466B · dev <span class="num">2.005</span></span>
+    </div>
+  </div>
+  <ul>
+    <li><b>데이터</b>: train 10,000 clip(모두 LiDAR 있음), dev 238. 평가는 val 500(in-distribution)과 ood 262다.</li>
+    <li><b>라벨</b>
+      <ul>
+        <li>driving: A2의 CoC + meta-action(pseudo label)과 GT 궤적.</li>
+        <li>detection: front-wide 카메라에 대한 A2 JSON 박스.</li>
+      </ul>
+    </li>
+    <li><b>손실</b>: CE + A2 top-64 KL + expert flow matching(GT 미래).</li>
+    <li><b>학습</b>: FSDP2, Blackwell 4장, global batch 32, lr 1e-4, dev 기준 조기 종료.</li>
+  </ul>
+</section>
+
+<section aria-labelledby="s2-h">
+  <h2 id="s2-h">가지치기 구조 선택</h2>
+  <p>A2 층을 하나씩 빼서 과제 손실을 쟀다(drop-one, 16 clip).</p>
+  <ul>
+    <li>층 0과 6을 빼면 driving CE가 각각 <span class="num">+12.4</span>, <span class="num">+13.3</span> nats 올라 손실이 폭증한다.</li>
+    <li>층 1–5와 8–36은 대부분 ±0.01 이내다.</li>
+    <li>층 63은 <span class="num">+1.6</span>이고, 뒤쪽 층(40–62)은 조금씩 기여한다.</li>
+  </ul>
+  <p>처음 쓴 Block Influence 지표는 층 6을 버리는 쪽으로 골라 틀렸다. 그래서 drop-one 기준으로 바꿨다.</p>
+  <div class="tbl">
+    <table>
+      <caption class="meta" style="caption-side:bottom;text-align:left;padding-top:6px">G2b: 각 후보를 1 epoch 학습한 뒤의 dev loss. 예산은 모두 약 0.47B다.</caption>
+      <thead><tr><th>후보</th><th>경로</th><th>층</th><th>d</th><th>dev loss</th><th>ce_drv</th><th>ce_det</th><th>fm</th></tr></thead>
+      <tbody>
+        <tr class="best"><td>C-wide (선택)</td><td>A2 → S1 → S2</td><td class="num">14</td><td class="num">1280</td><td class="num">2.497</td><td class="num">0.396</td><td class="num">0.494</td><td class="num">1.127</td></tr>
+        <tr><td>C-balanced</td><td>A2 → S1 → S2</td><td class="num">20</td><td class="num">1024</td><td class="num">2.532</td><td class="num">0.411</td><td class="num">0.497</td><td class="num">1.126</td></tr>
+        <tr><td>C-deep</td><td>A2 → S1 → S2</td><td class="num">28</td><td class="num">896</td><td class="num">2.568</td><td class="num">0.445</td><td class="num">0.522</td><td class="num">1.048</td></tr>
+        <tr><td>C-balanced one-shot</td><td>A2 → S2</td><td class="num">20</td><td class="num">1024</td><td class="num">4.639</td><td class="num">0.812</td><td class="num">0.762</td><td class="num">1.959</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <h3>최종 학습 (P3)</h3>
+  <p>C-wide는 7.05 epoch(step 2200, 9.95 h)에서 조기 종료됐고, best는 step 1700이다.</p>
+  <ul>
+    <li>dev loss <span class="num">2.005</span></li>
+    <li>ce_drv <span class="num">0.326</span>, kl_drv <span class="num">0.188</span></li>
+    <li>ce_det <span class="num">0.438</span>, kl_det <span class="num">0.205</span></li>
+    <li>fm <span class="num">0.848</span></li>
+  </ul>
+</section>
+
+<section aria-labelledby="s3-h">
+  <h2 id="s3-h">평가 (P4)</h2>
+  <p>student는 A2와 같은 설정으로 자유 생성한다.</p>
+  <ul>
+    <li>driving: CoC를 T 0.6으로 생성한 뒤 궤적 K=8개를 만든다.</li>
+    <li>detection: T 0.1로 생성한다.</li>
+  </ul>
+  <p>궤적은 GT 대비 거리(m)로 잰다.</p>
+  <ul>
+    <li>LiDAR student는 LiDAR가 있는 clip만 평가한다(val 482, ood 240).</li>
+    <li>빠진 clip(val 18, ood 22)은 데이터셋에 LiDAR와 3D 라벨이 아예 없다(<code>feature_presence</code>).</li>
+    <li>그래서 표는 전체 clip 값과 같은 clip 값을 함께 싣는다. 차트는 같은 clip 기준이다.</li>
+  </ul>
+
+  <h3>궤적</h3>
+  <div class="legend" aria-hidden="true">
+    <span><span class="sw ref"></span>Teacher / 기준 모델</span>
+    <span><span class="sw cam"></span>카메라 student</span>
+    <span><span class="sw lidar"></span>카메라 + LiDAR student</span>
+  </div>
+  <div class="charts2">
+    <div class="chart" id="traj-val"><div class="ctitle">val · 같은 482 clip · minADE@6 (m)</div></div>
+    <div class="chart" id="traj-ood"><div class="ctitle">ood · 같은 240 clip · minADE@6 (m)</div></div>
+  </div>
+  <div class="tbl">
+    <table>
+      <thead><tr><th>모델</th><th>n</th><th>minADE@1</th><th>minADE@6</th><th>minADE@8</th><th>minFDE@8</th></tr></thead>
+      <tbody>
+        <tr class="group"><td colspan="6">VAL_500 · 전체 clip</td></tr>
+        <tr><td><span class="sw ref"></span>A1.5</td><td class="num">500</td><td class="num">1.760</td><td class="num">0.824</td><td class="num">0.691</td><td class="num">1.840</td></tr>
+        <tr><td><span class="sw ref"></span>A2 (teacher)</td><td class="num">500</td><td class="num">2.017</td><td class="num">1.158</td><td class="num">1.082</td><td class="num">3.213</td></tr>
+        <tr><td><span class="sw cam"></span>카메라 student</td><td class="num">500</td><td class="num">3.653</td><td class="num">2.385</td><td class="num">2.257</td><td class="num">6.344</td></tr>
+        <tr class="group"><td colspan="6">VAL_500 · LiDAR가 있는 같은 482 clip</td></tr>
+        <tr><td><span class="sw ref"></span>A1.5</td><td class="num">482</td><td class="num">1.752</td><td class="num">0.820</td><td class="num">0.692</td><td class="num">1.843</td></tr>
+        <tr><td><span class="sw ref"></span>A2 (teacher)</td><td class="num">482</td><td class="num">2.017</td><td class="num">1.157</td><td class="num">1.081</td><td class="num">3.209</td></tr>
+        <tr><td><span class="sw cam"></span>카메라 student</td><td class="num">482</td><td class="num">3.635</td><td class="num">2.375</td><td class="num">2.253</td><td class="num">6.338</td></tr>
+        <tr><td><span class="sw lidar"></span>LiDAR student</td><td class="num">482</td><td class="num">3.754</td><td class="num">2.475</td><td class="num">2.338</td><td class="num">6.364</td></tr>
+        <tr class="group"><td colspan="6">OOD_262 · 전체 clip</td></tr>
+        <tr><td><span class="sw ref"></span>A1.5</td><td class="num">262</td><td class="num">2.090</td><td class="num">1.000</td><td class="num">0.921</td><td class="num">2.226</td></tr>
+        <tr><td><span class="sw ref"></span>A2 (teacher)</td><td class="num">262</td><td class="num">2.162</td><td class="num">1.253</td><td class="num">1.147</td><td class="num">3.200</td></tr>
+        <tr><td><span class="sw cam"></span>카메라 student</td><td class="num">262</td><td class="num">4.554</td><td class="num">3.039</td><td class="num">2.874</td><td class="num">7.546</td></tr>
+        <tr class="group"><td colspan="6">OOD_262 · LiDAR가 있는 같은 240 clip</td></tr>
+        <tr><td><span class="sw ref"></span>A1.5</td><td class="num">240</td><td class="num">2.114</td><td class="num">1.022</td><td class="num">0.942</td><td class="num">2.278</td></tr>
+        <tr><td><span class="sw ref"></span>A2 (teacher)</td><td class="num">240</td><td class="num">2.160</td><td class="num">1.256</td><td class="num">1.151</td><td class="num">3.179</td></tr>
+        <tr><td><span class="sw cam"></span>카메라 student</td><td class="num">240</td><td class="num">4.492</td><td class="num">3.031</td><td class="num">2.863</td><td class="num">7.545</td></tr>
+        <tr><td><span class="sw lidar"></span>LiDAR student</td><td class="num">240</td><td class="num">4.710</td><td class="num">3.139</td><td class="num">2.966</td><td class="num">7.714</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="meta">카메라 student − A2 (paired, 95% CI): minADE@6 val <span class="num">+1.23 [+1.00, +1.44]</span>, ood <span class="num">+1.79 [+1.44, +2.11]</span>.</p>
+
+  <h3>detection (front-wide, IoU 0.5)</h3>
+  <p class="meta">기준 박스는 3D 자동 라벨(<code>obstacle.offline</code>)을 투영해 만든다.</p>
+  <ul class="meta">
+    <li><b>v2 (주 기준)</b>: 기존 필터(가시율 ≥ 0.5, 높이 ≥ 12 px, 거리 ≤ 80 m)에 두 조건을 더했다.
+      <ul>
+        <li>LiDAR 가림 필터: 3D 박스 안에 LiDAR 점이 3개 이상이어야 한다. 박스는 그 방위의 LiDAR 측정 시각으로 보간한 뒤 egomotion으로 t0에 맞춘다.</li>
+        <li>클래스: 차량, 보행자, 자전거만 남긴다.</li>
+      </ul>
+    </li>
+    <li><b>v1</b>: 가림 검사가 없는 기존 기준이다. 표의 R (v1) 열에 함께 적었다.</li>
+    <li>LiDAR 필터로 빠진 박스는 3.6–3.8%다. 기준 박스 수는 val 2,296 → 2,198, ood 1,819 → 1,720이다.</li>
+    <li>참조 박스가 있는 clip만 쓴다(val 436, ood 232).</li>
+  </ul>
+  <div class="tbl">
+    <table>
+      <thead><tr><th>모델</th><th>P</th><th>R</th><th>R (v1)</th><th>R @0.3</th><th>박스/clip</th><th>R 0–30 m</th><th>R 30–60 m</th><th>R 60 m+</th></tr></thead>
+      <tbody>
+        <tr class="group"><td colspan="9">VAL_500</td></tr>
+        <tr><td><span class="sw ref"></span>A2</td><td class="num">0.888</td><td class="num">0.375</td><td class="num">0.359</td><td class="num">0.384</td><td class="num">2.13</td><td class="num">0.454</td><td class="num">0.277</td><td class="num">0.138</td></tr>
+        <tr><td><span class="sw cam"></span>카메라 student</td><td class="num">0.456</td><td class="num">0.218</td><td class="num">0.209</td><td class="num">0.298</td><td class="num">2.41</td><td class="num">0.295</td><td class="num">0.119</td><td class="num">0.031</td></tr>
+        <tr><td><span class="sw lidar"></span>LiDAR student</td><td class="num">0.410</td><td class="num">0.227</td><td class="num">0.218</td><td class="num">0.307</td><td class="num">2.78</td><td class="num">0.308</td><td class="num">0.122</td><td class="num">0.031</td></tr>
+        <tr class="group"><td colspan="9">OOD_262</td></tr>
+        <tr><td><span class="sw ref"></span>A2</td><td class="num">0.911</td><td class="num">0.328</td><td class="num">0.311</td><td class="num">0.341</td><td class="num">2.67</td><td class="num">0.401</td><td class="num">0.211</td><td class="num">0.231</td></tr>
+        <tr><td><span class="sw cam"></span>카메라 student</td><td class="num">0.491</td><td class="num">0.188</td><td class="num">0.179</td><td class="num">0.266</td><td class="num">2.84</td><td class="num">0.240</td><td class="num">0.107</td><td class="num">0.038</td></tr>
+        <tr><td><span class="sw lidar"></span>LiDAR student</td><td class="num">0.398</td><td class="num">0.187</td><td class="num">0.177</td><td class="num">0.283</td><td class="num">3.49</td><td class="num">0.242</td><td class="num">0.101</td><td class="num">0.038</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="meta">IoU 0.5. P, R, 거리별 R, R @0.3은 v2 기준이다.</p>
+
+  <h3>reasoning (A2와의 일치)</h3>
+  <p>카메라 student의 val 결과는 다음과 같다.</p>
+  <ul>
+    <li>meta-action 세 항목(종 · 횡 · 차선)이 모두 맞는 비율: <span class="num">0.304</span>. 항목별로는 종 <span class="num">0.498</span>, 횡 <span class="num">0.646</span>, 차선 <span class="num">0.760</span>이다.</li>
+    <li>CoC ROUGE-L: <span class="num">0.519</span></li>
+  </ul>
+  <p>ood에서는 세 항목 일치 <span class="num">0.271</span>, ROUGE-L <span class="num">0.422</span>다.</p>
+
+  <div class="note">
+    <span class="label">해석</span>
+    <ul>
+      <li>detection은 precision이 A2의 절반 수준이고, 30 m 밖에서 특히 약하다.</li>
+      <li>보행자 recall은 val에서 A2와 student 모두 0.01 수준이다(ood에서 A2 0.05). A2가 보행자를 거의 출력하지 않으므로 student가 배울 보행자 라벨도 없다.</li>
+      <li>가림 필터는 기준 박스를 4–5%만 줄인다. 그래서 모든 모델의 recall이 0.01–0.02 오르고 precision은 그대로다. 모델 순위는 v1과 같다.</li>
+    </ul>
+  </div>
+</section>
+
+<section aria-labelledby="s4-h">
+  <h2 id="s4-h">궤적 격차는 어디서 오나</h2>
+  <p>카메라 student에 A2가 만든 CoC를 강제로 넣고 궤적을 다시 만들었다(val 100 clip).</p>
+  <div class="chart" id="diag"><div class="ctitle">minADE@6 (m)</div></div>
+  <div class="tbl">
+    <table>
+      <thead><tr><th>비교 (minADE@6)</th><th>차이 (m)</th><th>95% CI</th><th></th></tr></thead>
+      <tbody>
+        <tr><td>A2 CoC 강제 − student 자신의 CoC</td><td class="num">−0.265</td><td class="num">[−0.470, −0.074]</td><td><span class="chip sig">유의</span></td></tr>
+        <tr><td>A2 CoC 강제 − A2 자체</td><td class="num">+0.468</td><td class="num">[+0.014, +0.891]</td><td><span class="chip sig">유의</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="note">
+    <span class="label">해석</span>
+    <p>CoC를 고치면 격차(<span class="num">0.73 m</span>)의 약 1/3이 줄어든다. 남은 2/3은 작아진 expert(d 512)와 VLM 특징의 한계다. 평가 코드 버그는 아니다.</p>
+  </div>
+</section>
+
+<section aria-labelledby="s5-h">
+  <h2 id="s5-h">LiDAR 입력 추가</h2>
+  <p>입력만 바꿨다. 카메라 6대 × 4프레임에 LiDAR range image 토큰 256개를 더했다.</p>
+  <ul>
+    <li>range image는 128×1024이고, 전용 RangeViT 15.3M으로 토큰을 만든다.</li>
+    <li>positional embedding: 주기적 방위각, 빔의 실제 고도각, patch별 측정 시각 Δt.</li>
+    <li>t0 이전에 끝난 회전만 쓰고, 점마다 t0 자세로 deskew한다.</li>
+    <li>나머지 조건은 카메라 student와 같다.</li>
+  </ul>
+  <p>LiDAR student는 6.41 epoch(step 2000)에서 조기 종료됐고, best는 step 1500이다. dev loss는 <span class="num">2.011</span>로 카메라의 <span class="num">2.005</span>와 거의 같다.</p>
+  <div class="chart" id="lidar-ci"><div class="ctitle">LiDAR − 카메라, 같은 clip paired 차이 (m, 95% CI) · 오른쪽일수록 LiDAR가 나쁨</div></div>
+  <div class="tbl">
+    <table>
+      <thead><tr><th>항목 (LiDAR − 카메라)</th><th>val (482)</th><th></th><th>ood (240)</th><th></th></tr></thead>
+      <tbody>
+        <tr><td>detection TP / clip (v2)</td><td class="num">+0.044 [−0.034, +0.124]</td><td><span class="chip ns">차이 없음</span></td><td class="num">−0.004 [−0.134, +0.116]</td><td><span class="chip ns">차이 없음</span></td></tr>
+        <tr><td>detection FP / clip (v2)</td><td class="num">+0.330 [+0.179, +0.500]</td><td><span class="chip sig">유의</span></td><td class="num">+0.655 [+0.418, +0.914]</td><td><span class="chip sig">유의</span></td></tr>
+        <tr><td>meta-action 3항목 일치</td><td class="num">+0.002 [−0.046, +0.048]</td><td><span class="chip ns">차이 없음</span></td><td class="num">−0.067 [−0.125, −0.008]</td><td><span class="chip sig">유의</span></td></tr>
+        <tr><td>CoC ROUGE-L</td><td class="num">+0.004 [−0.021, +0.030]</td><td><span class="chip ns">차이 없음</span></td><td class="num">+0.036 [+0.006, +0.066]</td><td><span class="chip sig">유의</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="meta">거리별 TP / clip(v2)도 0–30 m, 30–60 m, 60 m+ 모두 CI가 0을 포함한다. detection F1(v2)은 val 카메라 0.295 / LiDAR 0.292, ood 0.272 / 0.255다.</p>
+  <div class="note">
+    <span class="label">해석</span>
+    <ul>
+      <li>궤적은 모든 CI가 0을 포함한다. 효과가 없거나, 측정할 수 없을 만큼 작다.</li>
+      <li>detection에서는 맞힌 박스는 같고 박스만 더 많이 낸다. 종료율도 0.979로 카메라의 0.992보다 낮다.</li>
+      <li>ood reasoning의 두 지표는 서로 반대 방향이다. seed가 하나뿐이고 여러 지표를 동시에 봤으므로 LiDAR의 효과로 보기 어렵다.</li>
+      <li>주원인은 라벨로 본다. reasoning과 detection 라벨은 카메라만 본 A2가 만들었다. 궤적은 GT지만, 병목이 지각이 아니라 계획 용량에 있다.</li>
+    </ul>
+  </div>
+</section>
+
+<section aria-labelledby="s6-h">
+  <h2 id="s6-h">다음 단계</h2>
+  <ul>
+    <li><b>진행 중</b>: detection 라벨을 3D 자동 라벨 투영 박스로 바꾼다. 가려진 물체는 LiDAR 점 수로 거른다. 그 뒤 카메라와 LiDAR student를 다시 학습해 비교한다(<code>plans/2026-10-21_a2-distill-gt-det.md</code>, 별도 세션).</li>
+    <li>궤적 병목: expert 폭을 늘리도록 예산을 다시 나누고, student CoC의 exposure bias를 줄인다.</li>
+    <li>재현성: seed를 반복해 학습 변동 폭을 확인한다.</li>
+  </ul>
+</section>
+
+<footer>
+  <span>상세 보고서: <code>reports/2026-10-15_a2-distill-p0-gates.md</code>(P0 게이트), <code>reports/2026-10-20_a2-distill-lidar.md</code>(LiDAR와 P4 상세).</span>
+  <span>수치 출처: <code>outputs/distill_s1</code>, <code>outputs/distill_g2b_*</code>, <code>outputs/distill_s2_wide_final</code>, <code>outputs/distill_s2_wide_lidar</code>, <code>outputs/distill_p4</code>(v1; 같은 clip 궤적은 <code>common_lidar_s2.json</code>, <code>experiments/distill/analyze_p4_common.py</code>), <code>outputs/distill_p4_v2</code>(v2 detection), <code>outputs/distill_gtboxes</code>(v2 기준 박스), <code>outputs/distill_diag_forcing</code>, <code>outputs/distill_depth_importance</code>.</span>
+  <span>가중치: <code>/mnt/nvme1n1/ad_vla/outputs/chan/a2_distill/s2_wide/{distill_s2_wide_final,distill_s2_wide_lidar}/best</code></span>
+</footer>
+
+</main>
+
+<script>
+(function () {
+  var NS = "http://www.w3.org/2000/svg";
+  function el(tag, attrs, parent) {
+    var e = document.createElementNS(NS, tag);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+  function tipFor(box) {
+    var t = document.createElement("div");
+    t.className = "tip"; t.hidden = true; box.appendChild(t);
+    return {
+      show: function (html, evt, row) {
+        t.innerHTML = html; t.hidden = false;
+        var b = box.getBoundingClientRect(), r = row.getBoundingClientRect();
+        var x = evt && evt.clientX ? evt.clientX - b.left + 12 : r.left - b.left + 40;
+        var y = r.top - b.top - t.offsetHeight - 6;
+        if (y < 0) y = r.bottom - b.top + 6;
+        x = Math.min(x, b.width - t.offsetWidth - 4);
+        t.style.left = Math.max(0, x) + "px"; t.style.top = y + "px";
+      },
+      hide: function () { t.hidden = true; }
+    };
+  }
+  function bindRow(g, tip, html) {
+    g.setAttribute("tabindex", "0");
+    g.addEventListener("pointermove", function (e) { tip.show(html, e, g); });
+    g.addEventListener("pointerleave", tip.hide);
+    g.addEventListener("focus", function () { tip.show(html, null, g); });
+    g.addEventListener("blur", tip.hide);
+  }
+
+  // Horizontal bars on one linear scale [0, max]
+  function hbar(id, rows, max, ticks) {
+    var box = document.getElementById(id), tip = tipFor(box);
+    var W = 420, L = 112, R = 46, rowH = 30, top = 6, H = top + rows.length * rowH + 22;
+    var svg = el("svg", { viewBox: "0 0 " + W + " " + H, role: "img" }, box);
+    var x = function (v) { return L + (W - L - R) * v / max; };
+    ticks.forEach(function (t) {
+      el("line", { x1: x(t), x2: x(t), y1: top, y2: H - 20, class: "grid" }, svg);
+      el("text", { x: x(t), y: H - 6, "text-anchor": "middle" }, svg).textContent = t;
+    });
+    rows.forEach(function (r, i) {
+      var y = top + i * rowH, g = el("g", { class: "row" }, svg);
+      el("rect", { x: 0, y: y, width: W, height: rowH, class: "hit" }, g);
+      el("text", { x: L - 10, y: y + rowH / 2 + 4, "text-anchor": "end", class: "lbl" }, g).textContent = r.label;
+      var w = Math.max(x(r.v) - L, 1), bh = 14, by = y + (rowH - bh) / 2;
+      el("path", { d: "M" + L + "," + by + "h" + (w - 4) + "a4,4 0 0 1 4,4v" + (bh - 8) + "a4,4 0 0 1 -4,4h" + (-(w - 4)) + "z",
+                   fill: "var(--" + r.c + ")" }, g);
+      el("text", { x: x(r.v) + 6, y: y + rowH / 2 + 4, class: "val" }, g).textContent = r.v.toFixed(3);
+      bindRow(g, tip, r.tip);
+    });
+    el("line", { x1: L, x2: L, y1: top, y2: H - 20, class: "zero" }, svg);
+  }
+
+  // Dot + whisker around zero on one linear scale [lo, hi]
+  function ci(id, rows, lo, hi, ticks) {
+    var box = document.getElementById(id), tip = tipFor(box);
+    var W = 640, L = 150, R = 20, rowH = 28, top = 6, H = top + rows.length * rowH + 22;
+    var svg = el("svg", { viewBox: "0 0 " + W + " " + H, role: "img" }, box);
+    var x = function (v) { return L + (W - L - R) * (v - lo) / (hi - lo); };
+    ticks.forEach(function (t) {
+      el("line", { x1: x(t), x2: x(t), y1: top, y2: H - 20, class: t === 0 ? "zero" : "grid" }, svg);
+      el("text", { x: x(t), y: H - 6, "text-anchor": "middle" }, svg).textContent = (t > 0 ? "+" : "") + t.toFixed(1);
+    });
+    rows.forEach(function (r, i) {
+      var y = top + i * rowH + rowH / 2, g = el("g", { class: "row" }, svg);
+      el("rect", { x: 0, y: y - rowH / 2, width: W, height: rowH, class: "hit" }, g);
+      el("text", { x: L - 10, y: y + 4, "text-anchor": "end", class: "lbl" }, g).textContent = r.label;
+      el("line", { x1: x(r.lo), x2: x(r.hi), y1: y, y2: y, stroke: "var(--lidar)", "stroke-width": 2, "stroke-linecap": "round" }, g);
+      el("circle", { cx: x(r.m), cy: y, r: 5, fill: "var(--lidar)", stroke: "var(--bg)", "stroke-width": 2 }, g);
+      bindRow(g, tip, r.label + "<br>" + (r.m > 0 ? "+" : "") + r.m.toFixed(3) + " m [" + r.lo.toFixed(3) + ", " + r.hi.toFixed(3) + "]<br>n = " + r.n);
+    });
+  }
+
+  function trajTip(name, n, a1, a6, a8, f8) {
+    return name + " · n " + n + "<br>minADE@1 " + a1 + "<br>minADE@6 " + a6 + "<br>minADE@8 " + a8 + "<br>minFDE@8 " + f8;
+  }
+  hbar("traj-val", [
+    { label: "A1.5", v: 0.820, c: "ref", tip: trajTip("A1.5", 482, "1.752", "0.820", "0.692", "1.843") },
+    { label: "A2", v: 1.157, c: "ref", tip: trajTip("A2", 482, "2.017", "1.157", "1.081", "3.209") },
+    { label: "카메라 student", v: 2.375, c: "cam", tip: trajTip("카메라 student", 482, "3.635", "2.375", "2.253", "6.338") },
+    { label: "LiDAR student", v: 2.475, c: "lidar", tip: trajTip("LiDAR student", 482, "3.754", "2.475", "2.338", "6.364") }
+  ], 3.5, [0, 1, 2, 3]);
+  hbar("traj-ood", [
+    { label: "A1.5", v: 1.022, c: "ref", tip: trajTip("A1.5", 240, "2.114", "1.022", "0.942", "2.278") },
+    { label: "A2", v: 1.256, c: "ref", tip: trajTip("A2", 240, "2.160", "1.256", "1.151", "3.179") },
+    { label: "카메라 student", v: 3.031, c: "cam", tip: trajTip("카메라 student", 240, "4.492", "3.031", "2.863", "7.545") },
+    { label: "LiDAR student", v: 3.139, c: "lidar", tip: trajTip("LiDAR student", 240, "4.710", "3.139", "2.966", "7.714") }
+  ], 3.5, [0, 1, 2, 3]);
+  hbar("diag", [
+    { label: "student CoC", v: 2.231, c: "cam", tip: "student 자신의 CoC<br>minADE@6 2.231 · minFDE@8 5.968" },
+    { label: "A2 CoC 강제", v: 1.966, c: "cam", tip: "A2 CoC를 강제로 넣음<br>minADE@6 1.966 · minFDE@8 5.001" },
+    { label: "A2 자체", v: 1.499, c: "ref", tip: "A2 teacher<br>minADE@6 1.499 · minFDE@8 4.047" }
+  ], 2.5, [0, 0.5, 1, 1.5, 2, 2.5]);
+  ci("lidar-ci", [
+    { label: "val · minADE@1", m: 0.119, lo: -0.073, hi: 0.313, n: 482 },
+    { label: "val · minADE@6", m: 0.100, lo: -0.064, hi: 0.258, n: 482 },
+    { label: "val · minADE@8", m: 0.085, lo: -0.073, hi: 0.236, n: 482 },
+    { label: "ood · minADE@1", m: 0.218, lo: -0.228, hi: 0.751, n: 240 },
+    { label: "ood · minADE@6", m: 0.109, lo: -0.161, hi: 0.421, n: 240 },
+    { label: "ood · minADE@8", m: 0.103, lo: -0.166, hi: 0.418, n: 240 }
+  ], -0.4, 0.8, [-0.4, -0.2, 0, 0.2, 0.4, 0.6, 0.8]);
+})();
+</script>
+</body>
+</html>
