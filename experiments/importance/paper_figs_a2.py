@@ -34,7 +34,7 @@ from matplotlib.patches import Patch
 from scipy.stats import spearmanr
 
 REPO = Path(__file__).resolve().parents[2]
-COMPRESSION = Path("/home/cvlab21/project/chan/alpamayo-model-compression")
+COMPRESSION = Path("/home/cvlab21/project/chan/advla/alpamayo-model-compression")
 sys.path.insert(0, str(COMPRESSION / "paper-analysis" / "scripts"))
 import paper_style as ps  # applies fig_criterion's rcParams on import
 

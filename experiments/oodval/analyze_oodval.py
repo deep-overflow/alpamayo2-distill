@@ -27,7 +27,7 @@ import pandas as pd
 from scipy import stats
 
 REPO = Path(__file__).resolve().parents[2]
-COMPRESSION = Path("/home/cvlab21/project/chan/alpamayo-model-compression")
+COMPRESSION = Path("/home/cvlab21/project/chan/advla/alpamayo-model-compression")
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(COMPRESSION / "experiments" / "head_analysis"))
 
